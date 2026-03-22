@@ -427,45 +427,68 @@ func handleInbound(msg WeixinMessage, state *SessionState, statePath string, reg
 
 // inputLoop reads terminal commands and sends outbound replies.
 func inputLoop(ctx context.Context, client *Client, state *SessionState, statePath string, registry *ChatRegistry, ioMu *sync.Mutex, persistMu *sync.Mutex) error {
-	scanner := bufio.NewScanner(os.Stdin)
+	lineCh := make(chan string)
+	scanErrCh := make(chan error, 1)
+
+	// Read stdin in the background so Ctrl+C can cancel the foreground loop immediately.
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			select {
+			case lineCh <- scanner.Text():
+			case <-ctx.Done():
+				return
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			scanErrCh <- err
+			return
+		}
+		scanErrCh <- io.EOF
+	}()
 
 	ioMu.Lock()
 	printPromptLocked(registry)
 	ioMu.Unlock()
 
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case err := <-scanErrCh:
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		case rawLine := <-lineCh:
+			line := strings.TrimSpace(rawLine)
+			if line == "" {
+				ioMu.Lock()
+				printPromptLocked(registry)
+				ioMu.Unlock()
+				continue
+			}
+
+			if strings.HasPrefix(line, "/") {
+				if err := handleCommand(ctx, line, client, state, statePath, registry, ioMu, persistMu); err != nil {
+					if errors.Is(err, context.Canceled) {
+						return err
+					}
+					errorLogger.Error("命令执行失败", "error", err)
+				}
+			} else {
+				if err := sendToCurrent(ctx, client, registry, line); err != nil {
+					ioMu.Lock()
+					errorLogger.Error("发送失败", "error", err)
+					ioMu.Unlock()
+				}
+			}
+
 			ioMu.Lock()
 			printPromptLocked(registry)
 			ioMu.Unlock()
-			continue
 		}
-
-		if strings.HasPrefix(line, "/") {
-			if err := handleCommand(ctx, line, client, state, statePath, registry, ioMu, persistMu); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return err
-				}
-				errorLogger.Error("命令执行失败", "error", err)
-			}
-		} else {
-			if err := sendToCurrent(ctx, client, registry, line); err != nil {
-				ioMu.Lock()
-				errorLogger.Error("发送失败", "error", err)
-				ioMu.Unlock()
-			}
-		}
-
-		ioMu.Lock()
-		printPromptLocked(registry)
-		ioMu.Unlock()
 	}
-
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	return ctx.Err()
 }
 
 // handleCommand executes one terminal command.
