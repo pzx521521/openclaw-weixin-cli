@@ -80,7 +80,7 @@
     <h2>发件</h2>
     <p class="hint" id="app-who"></p>
     <label>消息内容</label>
-    <textarea id="send-text" placeholder="输入要发送的文本" oninput="refreshCurl()"></textarea>
+    <textarea id="send-text" placeholder="留空点按钮则仅读取，不发送" oninput="refreshCurl()"></textarea>
     <div class="row">
       <button id="btn-send" onclick="doSend()">读取+发送</button>
       <button class="ghost" onclick="doLogout()">退出</button>
@@ -276,7 +276,7 @@ async function doSend() {
     const d = await post('/api/send', { text: $('send-text').value });
     $('send-out').textContent = JSON.stringify(d, null, 2);
     $('send-out').classList.remove('hidden');
-    if (!d.sent && d.error) {
+    if (d.error) {
       $('send-err').textContent = d.error;
       $('btn-go-activate').classList.remove('hidden');
     }
@@ -293,7 +293,7 @@ async function doLogout() {
 
 // ---------- curl 直调 ----------
 function curlCmd() {
-  const t = $('send-text').value.trim() || 'hi';
+  const t = $('send-text').value.trim();
   const payload = JSON.stringify({ user_id: currentUser, password: 'YOUR_PASSWORD', text: t });
   return "curl -s -X POST " + location.origin + "/api/send"
     + " -H 'Content-Type: application/json'"

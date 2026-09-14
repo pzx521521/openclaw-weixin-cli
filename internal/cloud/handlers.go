@@ -322,6 +322,7 @@ type sendReq struct {
 }
 
 // handleSend supports cookie sessions and direct user_id + password auth.
+// 空文本表示仅读取：短 poll 刷新 buf/context_token 后返回，不调用 SendText。
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w)
 	if r.Method == http.MethodOptions {
@@ -333,10 +334,6 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text := strings.TrimSpace(req.Text)
-	if text == "" {
-		writeErr(w, http.StatusBadRequest, "missing text")
-		return
-	}
 
 	userID, ok := s.authUserID(r)
 	if !ok {
@@ -356,6 +353,25 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.sendPoll+20*time.Second)
 	defer cancel()
+
+	if text == "" {
+		var msgs []MsgItem
+		var pollErr string
+		if s.sendPoll > 0 {
+			if m, err := s.shortPoll(ctx, userID, s.sendPoll); err != nil {
+				pollErr = err.Error()
+			} else {
+				msgs = m
+			}
+		}
+		to, _, _ := s.resolveTarget(ctx, userID)
+		out := map[string]any{"to": to, "msgs": msgsOrEmpty(msgs), "sent": false, "read_only": true}
+		if pollErr != "" {
+			out["error"] = pollErr
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
 
 	to, msgs, sent, sendErr := s.sendText(ctx, userID, text, s.sendPoll)
 	out := map[string]any{"to": to, "msgs": msgs, "sent": sent}

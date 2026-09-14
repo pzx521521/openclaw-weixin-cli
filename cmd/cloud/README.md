@@ -38,7 +38,7 @@ go run ./cmd/cloud [-port 7860] [-web web/dist] [-poll 60s] [-send-timeout 200ms
 | `POST` | `/api/logout`           | cookie            | 清会话                                  |
 | `GET`  | `/api/me`               | cookie            | `{user_id, ready, peer, poll_timeout}`，激活页倒计时取此值 |
 | `GET`  | `/api/account/ready`    | cookie            | 长等一次（`-poll`，等满时长），`{ready, peer?}`；没收到第一条消息进不了发件页 |
-| `POST` | `/api/send`             | cookie **或** body | `{text}` 或 `{user_id, password, text}` → `{to, msgs, sent, error?}`；`msgs` 仅短 poll 模式非空；失败（token 过期等）去激活页发条微信刷新；支持跨域（`OPTIONS` 预检 + `*`），免登录直调 |
+| `POST` | `/api/send`             | cookie **或** body | `{text}` 或 `{user_id, password, text}` → `{to, msgs, sent, read_only?, error?}`；`msgs` 仅短 poll 模式非空；`text` 为空/空白则仅读取（短 poll 刷新 `buf`/`context_token`）不发送，返回 `sent:false, read_only:true`；失败（token 过期等）去激活页发条微信刷新；支持跨域（`OPTIONS` 预检 + `*`），免登录直调 |
 
 `send` 直调示例（脚本免登录）：
 
