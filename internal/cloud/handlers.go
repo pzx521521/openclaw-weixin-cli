@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -54,17 +53,17 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-// authBotID resolves the login session cookie to a bot_id.
-func (s *Server) authBotID(r *http.Request) (string, bool) {
+// authUserID resolves the login session cookie to a user_id.
+func (s *Server) authUserID(r *http.Request) (string, bool) {
 	token, ok := cookieToken(r)
 	if !ok {
 		return "", false
 	}
-	botID, err := s.store.GetSessionUser(r.Context(), token)
+	userID, err := s.store.GetSessionUser(r.Context(), token)
 	if err != nil {
 		return "", false
 	}
-	return botID, true
+	return userID, true
 }
 
 // handleHealth is an unauthenticated liveness check (DB pinged).
@@ -138,14 +137,13 @@ func (s *Server) handleRegisterStatus(w http.ResponseWriter, r *http.Request) {
 
 	switch status.Status {
 	case "confirmed":
-		if status.ILinkBotID == "" || status.BotToken == "" {
-			writeErr(w, http.StatusBadGateway, "login confirmed but token or bot id missing")
+		if strings.TrimSpace(status.ILinkUserID) == "" || status.BotToken == "" {
+			writeErr(w, http.StatusBadGateway, "login confirmed but token or user id missing, please rescan")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status":    "confirmed",
-			"bot_id":    status.ILinkBotID,
-			"user_id":   status.ILinkUserID,
+			"user_id":   strings.TrimSpace(status.ILinkUserID),
 			"base_url":  ilink.NormalizeBaseURL(status.BaseURL),
 			"bot_token": status.BotToken,
 		})
@@ -161,7 +159,6 @@ func (s *Server) handleRegisterStatus(w http.ResponseWriter, r *http.Request) {
 type finishReq struct {
 	Password string `json:"password"`
 	BotToken string `json:"bot_token"`
-	BotID    string `json:"bot_id"`
 	UserID   string `json:"user_id"`
 	BaseURL  string `json:"base_url"`
 }
@@ -172,14 +169,14 @@ func (s *Server) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	req.BotID = strings.TrimSpace(req.BotID)
+	req.UserID = strings.TrimSpace(req.UserID)
 	req.BotToken = strings.TrimSpace(req.BotToken)
 	if len(req.Password) < minPassLen {
 		writeErr(w, http.StatusBadRequest, "password too short, at least 6 characters")
 		return
 	}
-	if req.BotID == "" || req.BotToken == "" {
-		writeErr(w, http.StatusBadRequest, "missing bot_id or bot_token, scan the QR code first")
+	if req.UserID == "" || req.BotToken == "" {
+		writeErr(w, http.StatusBadRequest, "missing user_id or bot_token, scan the QR code first")
 		return
 	}
 	baseURL := ilink.NormalizeBaseURL(req.BaseURL)
@@ -203,49 +200,50 @@ func (s *Server) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "hash password: "+err.Error())
 		return
 	}
-	if err := s.store.CreateUser(r.Context(), req.BotID, hash, req.BotToken, strings.TrimSpace(req.UserID), baseURL); err != nil {
-		if errors.Is(err, ErrUserExists) {
-			writeErr(w, http.StatusConflict, "bot_id already registered, please login")
-			return
-		}
-		writeErr(w, http.StatusInternalServerError, "create user: "+err.Error())
+	overwritten, err := s.store.UpsertUserBinding(r.Context(), req.UserID, hash, req.BotToken, baseURL)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "save user: "+err.Error())
 		return
 	}
 
-	token, err := s.store.CreateSession(r.Context(), req.BotID, sessionTTL)
+	token, err := s.store.CreateSession(r.Context(), req.UserID, sessionTTL)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "create session: "+err.Error())
 		return
 	}
 	setSessionCookie(w, token)
-	writeJSON(w, http.StatusOK, map[string]string{"bot_id": req.BotID})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user_id":     req.UserID,
+		"overwritten": overwritten,
+	})
 }
 
 type loginReq struct {
-	BotID    string `json:"bot_id"`
+	UserID   string `json:"user_id"`
 	Password string `json:"password"`
 }
 
-// handleLogin verifies bot_id + password and issues a session cookie.
+// handleLogin verifies user_id + password and issues a session cookie.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginReq
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	req.BotID = strings.TrimSpace(req.BotID)
-	u, err := s.store.GetUser(r.Context(), req.BotID)
+	u, err := s.store.GetUser(r.Context(), req.UserID)
 	if err != nil || CheckPassword(u.PasswordHash, req.Password) != nil {
-		writeErr(w, http.StatusUnauthorized, "bot_id 或密码错误")
+		writeErr(w, http.StatusUnauthorized, "账号或密码错误")
 		return
 	}
 	// Note: err==nil here implies u != nil; CheckPassword(nil) would fail above.
-	token, err := s.store.CreateSession(r.Context(), u.BotID, sessionTTL)
+	// Re-login refreshes the token: drop all previous sessions first.
+	_ = s.store.DeleteUserSessions(r.Context(), u.UserID)
+	token, err := s.store.CreateSession(r.Context(), u.UserID, sessionTTL)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "create session: "+err.Error())
 		return
 	}
 	setSessionCookie(w, token)
-	writeJSON(w, http.StatusOK, map[string]string{"bot_id": u.BotID})
+	writeJSON(w, http.StatusOK, map[string]string{"user_id": u.UserID})
 }
 
 // handleLogout drops the session.
@@ -259,12 +257,12 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // handleMe returns the current account summary.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	botID, ok := s.authBotID(r)
+	userID, ok := s.authUserID(r)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	u, err := s.store.GetUser(r.Context(), botID)
+	u, err := s.store.GetUser(r.Context(), userID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "load user: "+err.Error())
 		return
@@ -274,7 +272,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		peer = to
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"bot_id":       botID,
+		"user_id":      userID,
 		"ready":        u.Ready,
 		"peer":         peer,
 		"poll_timeout": int(s.poll.Seconds()),
@@ -284,7 +282,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // handleReady waits up to the poll timeout for the first inbound message.
 // A single getupdates may return early-empty, so loop until the deadline.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	botID, ok := s.authBotID(r)
+	userID, ok := s.authUserID(r)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
@@ -298,18 +296,18 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"ready": false})
 			return
 		}
-		if _, err := s.shortPoll(ctx, botID, time.Until(deadline)); err != nil {
+		if _, err := s.shortPoll(ctx, userID, time.Until(deadline)); err != nil {
 			writeErr(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		if to, _, err := s.resolveTarget(ctx, botID); err == nil {
+		if to, _, err := s.resolveTarget(ctx, userID); err == nil {
 			writeJSON(w, http.StatusOK, map[string]any{"ready": true, "peer": to})
 			return
 		}
 	}
 }
 
-// setCORSHeaders allows cross-origin direct calls (bot_id + password, no cookies).
+// setCORSHeaders allows cross-origin direct calls (user_id + password, no cookies).
 func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
@@ -319,11 +317,11 @@ func setCORSHeaders(w http.ResponseWriter) {
 
 type sendReq struct {
 	Text     string `json:"text"`
-	BotID    string `json:"bot_id"`
+	UserID   string `json:"user_id"`
 	Password string `json:"password"`
 }
 
-// handleSend supports cookie sessions and direct bot_id + password auth.
+// handleSend supports cookie sessions and direct user_id + password auth.
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	setCORSHeaders(w)
 	if r.Method == http.MethodOptions {
@@ -340,26 +338,26 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	botID, ok := s.authBotID(r)
+	userID, ok := s.authUserID(r)
 	if !ok {
-		// Direct API auth: bot_id + password in body.
-		req.BotID = strings.TrimSpace(req.BotID)
-		if req.BotID == "" || req.Password == "" {
+		// Direct API auth: user_id + password in body.
+		req.UserID = strings.TrimSpace(req.UserID)
+		if req.UserID == "" || req.Password == "" {
 			writeErr(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		u, err := s.store.GetUser(r.Context(), req.BotID)
+		u, err := s.store.GetUser(r.Context(), req.UserID)
 		if err != nil || CheckPassword(u.PasswordHash, req.Password) != nil {
-			writeErr(w, http.StatusUnauthorized, "bot_id 或密码错误")
+			writeErr(w, http.StatusUnauthorized, "账号或密码错误")
 			return
 		}
-		botID = u.BotID
+		userID = u.UserID
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.sendPoll+20*time.Second)
 	defer cancel()
 
-	to, msgs, sent, sendErr := s.sendText(ctx, botID, text, s.sendPoll)
+	to, msgs, sent, sendErr := s.sendText(ctx, userID, text, s.sendPoll)
 	out := map[string]any{"to": to, "msgs": msgs, "sent": sent}
 	if !sent {
 		out["error"] = sendErr

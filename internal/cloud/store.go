@@ -5,26 +5,24 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	ilink "github.com/pzx521521/openclaw-weixin-cli/internal/ilink"
 )
 
 var (
-	ErrUserExists = errors.New("user already exists")
-	ErrNotFound   = errors.New("not found")
+	ErrNotFound = errors.New("not found")
 )
 
 const schema = `
 CREATE TABLE IF NOT EXISTS wechat_users (
-	bot_id          TEXT PRIMARY KEY,
+	user_id         TEXT PRIMARY KEY,
 	password_hash   TEXT NOT NULL,
 	bot_token       TEXT NOT NULL,
-	user_id         TEXT NOT NULL DEFAULT '',
 	base_url        TEXT NOT NULL DEFAULT 'https://ilinkai.weixin.qq.com',
 	get_updates_buf TEXT NOT NULL DEFAULT '',
 	current_peer    TEXT NOT NULL DEFAULT '',
@@ -35,7 +33,7 @@ CREATE TABLE IF NOT EXISTS wechat_users (
 );
 CREATE TABLE IF NOT EXISTS wechat_sessions (
 	token      TEXT PRIMARY KEY,
-	bot_id     TEXT NOT NULL REFERENCES wechat_users(bot_id) ON DELETE CASCADE,
+	user_id    TEXT NOT NULL REFERENCES wechat_users(user_id) ON DELETE CASCADE,
 	expires_at TIMESTAMPTZ NOT NULL,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -80,12 +78,11 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return err
 }
 
-// UserRow mirrors wechat_users.
+// UserRow mirrors wechat_users, keyed by WeChat user_id.
 type UserRow struct {
-	BotID         string
+	UserID        string
 	PasswordHash  string
 	BotToken      string
-	UserID        string
 	BaseURL       string
 	GetUpdatesBuf string
 	CurrentPeer   string
@@ -97,7 +94,7 @@ func scanUser(row pgx.Row) (*UserRow, error) {
 	var u UserRow
 	var peersRaw string
 	err := row.Scan(
-		&u.BotID, &u.PasswordHash, &u.BotToken, &u.UserID,
+		&u.UserID, &u.PasswordHash, &u.BotToken,
 		&u.BaseURL, &u.GetUpdatesBuf, &u.CurrentPeer,
 		&peersRaw, &u.Ready,
 	)
@@ -116,28 +113,57 @@ func scanUser(row pgx.Row) (*UserRow, error) {
 	return &u, nil
 }
 
-const userColumns = `bot_id, password_hash, bot_token, user_id, base_url, get_updates_buf, current_peer, peers, ready`
+const userColumns = `user_id, password_hash, bot_token, base_url, get_updates_buf, current_peer, peers, ready`
 
-// CreateUser inserts a new account; returns ErrUserExists on duplicate bot_id.
-func (s *Store) CreateUser(ctx context.Context, botID, passwordHash, botToken, userID, baseURL string) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO wechat_users (bot_id, password_hash, bot_token, user_id, base_url) VALUES ($1,$2,$3,$4,$5)`,
-		botID, passwordHash, botToken, userID, baseURL,
-	)
+// UpsertUserBinding overwrites the row for one WeChat identity with a fresh
+// scan binding: credentials replaced, sync state reset, previous sessions
+// dropped. Returns overwritten=true when the identity already existed.
+func (s *Store) UpsertUserBinding(ctx context.Context, userID, passwordHash, botToken, baseURL string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return ErrUserExists
-		}
-		return err
+		return false, err
 	}
-	return nil
+	defer tx.Rollback(ctx)
+
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM wechat_users WHERE user_id=$1)`, userID).Scan(&exists); err != nil {
+		return false, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO wechat_users (user_id, password_hash, bot_token, base_url,
+			get_updates_buf, current_peer, peers, ready, updated_at)
+		VALUES ($1,$2,$3,$4,'','','{}',FALSE,now())
+		ON CONFLICT (user_id) DO UPDATE SET
+			password_hash=EXCLUDED.password_hash,
+			bot_token=EXCLUDED.bot_token,
+			base_url=EXCLUDED.base_url,
+			get_updates_buf='',
+			current_peer='',
+			peers='{}',
+			ready=FALSE,
+			updated_at=now()`,
+		userID, passwordHash, botToken, baseURL,
+	); err != nil {
+		return false, err
+	}
+	// Credentials rotated: drop previous sessions of this identity.
+	if _, err := tx.Exec(ctx, `DELETE FROM wechat_sessions WHERE user_id=$1`, userID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
-// GetUser loads one account by bot_id.
-func (s *Store) GetUser(ctx context.Context, botID string) (*UserRow, error) {
+// GetUser loads one account by WeChat user_id (the login name).
+func (s *Store) GetUser(ctx context.Context, userID string) (*UserRow, error) {
+	if strings.TrimSpace(userID) == "" {
+		return nil, ErrNotFound
+	}
 	return scanUser(s.pool.QueryRow(ctx,
-		`SELECT `+userColumns+` FROM wechat_users WHERE bot_id=$1`, botID))
+		`SELECT `+userColumns+` FROM wechat_users WHERE user_id=$1`, strings.TrimSpace(userID)))
 }
 
 // ToState converts a row into the shared ilink session shape.
@@ -148,7 +174,6 @@ func (u *UserRow) ToState() *ilink.SessionState {
 	}
 	return &ilink.SessionState{
 		BotToken:      u.BotToken,
-		BotID:         u.BotID,
 		UserID:        u.UserID,
 		BaseURL:       u.BaseURL,
 		GetUpdatesBuf: u.GetUpdatesBuf,
@@ -158,7 +183,7 @@ func (u *UserRow) ToState() *ilink.SessionState {
 }
 
 // WithLockedState runs fn with the account row locked, then persists buf/peers.
-func (s *Store) WithLockedState(ctx context.Context, botID string, fn func(state *ilink.SessionState, reg *ilink.ChatRegistry) error) error {
+func (s *Store) WithLockedState(ctx context.Context, userID string, fn func(state *ilink.SessionState, reg *ilink.ChatRegistry) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -166,7 +191,7 @@ func (s *Store) WithLockedState(ctx context.Context, botID string, fn func(state
 	defer tx.Rollback(ctx)
 
 	u, err := scanUser(tx.QueryRow(ctx,
-		`SELECT `+userColumns+` FROM wechat_users WHERE bot_id=$1 FOR UPDATE`, botID))
+		`SELECT `+userColumns+` FROM wechat_users WHERE user_id=$1 FOR UPDATE`, userID))
 	if err != nil {
 		return err
 	}
@@ -184,8 +209,8 @@ func (s *Store) WithLockedState(ctx context.Context, botID string, fn func(state
 	}
 	ready := u.Ready || len(state.Peers) > 0
 	_, err = tx.Exec(ctx,
-		`UPDATE wechat_users SET get_updates_buf=$2, current_peer=$3, peers=$4, ready=$5, updated_at=now() WHERE bot_id=$1`,
-		botID, state.GetUpdatesBuf, state.CurrentPeer, string(peersRaw), ready,
+		`UPDATE wechat_users SET get_updates_buf=$2, current_peer=$3, peers=$4, ready=$5, updated_at=now() WHERE user_id=$1`,
+		u.UserID, state.GetUpdatesBuf, state.CurrentPeer, string(peersRaw), ready,
 	)
 	if err != nil {
 		return err
@@ -194,14 +219,14 @@ func (s *Store) WithLockedState(ctx context.Context, botID string, fn func(state
 }
 
 // CreateSession stores a login token with TTL and returns it.
-func (s *Store) CreateSession(ctx context.Context, botID string, ttl time.Duration) (string, error) {
+func (s *Store) CreateSession(ctx context.Context, userID string, ttl time.Duration) (string, error) {
 	token, err := randomToken()
 	if err != nil {
 		return "", err
 	}
 	_, err = s.pool.Exec(ctx,
-		`INSERT INTO wechat_sessions (token, bot_id, expires_at) VALUES ($1,$2,$3)`,
-		token, botID, time.Now().Add(ttl),
+		`INSERT INTO wechat_sessions (token, user_id, expires_at) VALUES ($1,$2,$3)`,
+		token, userID, time.Now().Add(ttl),
 	)
 	if err != nil {
 		return "", err
@@ -209,23 +234,30 @@ func (s *Store) CreateSession(ctx context.Context, botID string, ttl time.Durati
 	return token, nil
 }
 
-// GetSessionUser returns the bot_id for a valid, unexpired session token.
+// GetSessionUser returns the user_id for a valid, unexpired session token.
 func (s *Store) GetSessionUser(ctx context.Context, token string) (string, error) {
-	var botID string
+	var userID string
 	err := s.pool.QueryRow(ctx,
-		`SELECT bot_id FROM wechat_sessions WHERE token=$1 AND expires_at>now()`, token).Scan(&botID)
+		`SELECT user_id FROM wechat_sessions WHERE token=$1 AND expires_at>now()`, token).Scan(&userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", ErrNotFound
 		}
 		return "", err
 	}
-	return botID, nil
+	return userID, nil
 }
 
 // DeleteSession removes one login token.
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM wechat_sessions WHERE token=$1`, token)
+	return err
+}
+
+// DeleteUserSessions removes all login tokens of one account.
+// Called on re-login so old cookies stop working (single active session).
+func (s *Store) DeleteUserSessions(ctx context.Context, userID string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM wechat_sessions WHERE user_id=$1`, userID)
 	return err
 }
 

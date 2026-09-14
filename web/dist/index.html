@@ -33,8 +33,8 @@
   <!-- 登录 -->
   <div id="view-login">
     <h2>登录</h2>
-    <label>bot_id（用户名）</label>
-    <input id="login-bot" placeholder="xxxx@im.bot" autocomplete="username">
+    <label>账号（微信 user_id）</label>
+    <input id="login-user" placeholder="xxx@im.wechat" autocomplete="username">
     <label>密码</label>
     <input id="login-pass" type="password" placeholder="注册时设置的密码" autocomplete="current-password">
     <button id="btn-login" onclick="doLogin()">登录</button>
@@ -65,8 +65,9 @@
   <!-- 激活：等第一条微信消息 -->
   <div id="view-activate" class="hidden">
     <h2>激活账号</h2>
-    <p class="ok">你的 bot_id：</p>
-    <p class="mono" id="act-botid"></p>
+    <p class="ok">你的账号：</p>
+    <p class="mono" id="act-userid"></p>
+    <p class="err hidden" id="act-replaced"></p>
     <p class="hint">用你的微信ClawBot发 <b>任意一条消息</b>，拿到回信凭证后即可发件。</p>
     <p class="hint" id="act-tip" style="text-align:center">正在等待…</p>
     <button id="btn-act-retry" class="hidden" onclick="fireReadyOnce()">重试</button>
@@ -85,7 +86,7 @@
       <button class="ghost" onclick="doLogout()">退出</button>
     </div>
     <div class="err" id="send-err"></div>
-    <button id="btn-go-activate" class="ghost hidden" style="margin-top:8px" onclick="showActivate(currentBot)">去激活 →</button>
+    <button id="btn-go-activate" class="ghost hidden" style="margin-top:8px" onclick="showActivate(currentUser)">去激活 →</button>
     <pre class="out hidden" id="send-out"></pre>
     <label style="margin-top:18px">跨域直调 curl（免登录，把 YOUR_PASSWORD 换成你的密码）</label>
     <pre class="out" id="curl-out"></pre>
@@ -100,7 +101,7 @@ let regTimer = null;
 let pollSecs = 60;
 let actTimer = null;
 let actAbort = null;
-let currentBot = '';
+let currentUser = '';
 
 function show(id) {
   ['view-login', 'view-register', 'view-activate', 'view-app'].forEach(v => $(v).classList.add('hidden'));
@@ -121,8 +122,8 @@ async function doLogin() {
   $('login-err').textContent = '';
   $('btn-login').disabled = true;
   try {
-    const d = await post('/api/login', { bot_id: $('login-bot').value.trim(), password: $('login-pass').value });
-    localStorage.setItem('bot_id', d.bot_id);
+    const d = await post('/api/login', { user_id: $('login-user').value.trim(), password: $('login-pass').value });
+    localStorage.setItem('user_id', d.user_id);
     $('login-pass').value = '';
     await enterApp();
   } catch (e) { $('login-err').textContent = e.message; }
@@ -181,11 +182,11 @@ async function pollRegStatus(qrcode, password) {
 async function regFinish(password, d) {
   try {
     const r = await post('/api/register/finish', {
-      password, bot_token: d.bot_token, bot_id: d.bot_id, user_id: d.user_id || '', base_url: d.base_url || ''
+      password, bot_token: d.bot_token, user_id: d.user_id || '', base_url: d.base_url || ''
     });
-    localStorage.setItem('bot_id', r.bot_id);
+    localStorage.setItem('user_id', r.user_id || '');
     $('reg-pass').value = ''; $('reg-pass2').value = '';
-    showActivate(r.bot_id);
+    showActivate(r.user_id, r.overwritten);
   } catch (e) { $('reg-err2').textContent = e.message; }
 }
 
@@ -202,9 +203,17 @@ async function apiWithTimeout(path, ms) {
 }
 
 // ---------- 激活（单长请求 + 手动重试） ----------
-function showActivate(botId) {
+function showActivate(userId, overwritten) {
   actStop();
-  $('act-botid').textContent = botId;
+  $('act-userid').textContent = userId;
+  const rep = $('act-replaced');
+  if (overwritten) {
+    rep.textContent = '已覆盖该微信旧绑定，请用新密码登录';
+    rep.classList.remove('hidden');
+  } else {
+    rep.textContent = '';
+    rep.classList.add('hidden');
+  }
   $('act-err').textContent = '';
   $('btn-act-retry').classList.add('hidden');
   show('view-activate');
@@ -246,10 +255,9 @@ async function enterApp(prefetched) {
   try {
     const me = prefetched || await api('/api/me');
     if (me.poll_timeout > 0) pollSecs = me.poll_timeout;
-    if (!me.ready) { showActivate(me.bot_id); return; }
-    currentBot = me.bot_id;
-    if (!me.ready) { showActivate(me.bot_id); return; }
-    $('app-who').textContent = '当前账号：' + me.bot_id + (me.peer ? '　WeChatClaw ID：' + me.peer : '');
+    if (!me.ready) { showActivate(me.user_id); return; }
+    currentUser = me.user_id || '';
+    $('app-who').textContent = '当前账号：' + (me.user_id || '') + (me.peer ? '　WeChatClaw ID：' + me.peer : '');
     refreshCurl();
     show('view-app');
   } catch (e) { show('view-login'); }
@@ -279,14 +287,14 @@ async function doSend() {
 async function doLogout() {
   try { await post('/api/logout', {}); } catch (e) {}
   $('send-text').value = '';
-  currentBot = '';
+  currentUser = '';
   show('view-login');
 }
 
 // ---------- curl 直调 ----------
 function curlCmd() {
   const t = $('send-text').value.trim() || 'hi';
-  const payload = JSON.stringify({ bot_id: currentBot, password: 'YOUR_PASSWORD', text: t });
+  const payload = JSON.stringify({ user_id: currentUser, password: 'YOUR_PASSWORD', text: t });
   return "curl -s -X POST " + location.origin + "/api/send"
     + " -H 'Content-Type: application/json'"
     + " -d '" + payload.replace(/'/g, "'\\''") + "'";
@@ -315,8 +323,8 @@ async function copyCurl() {
 
 // ---------- 入口 ----------
 (function init() {
-  const saved = localStorage.getItem('bot_id');
-  if (saved) $('login-bot').value = saved;
+  const saved = localStorage.getItem('user_id');
+  if (saved) $('login-user').value = saved;
   fetch('/api/me').then(async r => { if (r.ok) enterApp(await r.json()); });
 })();
 </script>

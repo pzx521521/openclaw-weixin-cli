@@ -18,9 +18,9 @@ type MsgItem struct {
 
 // shortPoll performs one bounded getupdates, persists buf/tokens, and
 // returns messages accumulated since the previous buf.
-func (s *Server) shortPoll(ctx context.Context, botID string, timeout time.Duration) ([]MsgItem, error) {
+func (s *Server) shortPoll(ctx context.Context, userID string, timeout time.Duration) ([]MsgItem, error) {
 	msgs := make([]MsgItem, 0)
-	err := s.store.WithLockedState(ctx, botID, func(state *ilink.SessionState, reg *ilink.ChatRegistry) error {
+	err := s.store.WithLockedState(ctx, userID, func(state *ilink.SessionState, reg *ilink.ChatRegistry) error {
 		client := ilink.NewClient(state.BaseURL, state.BotToken)
 		resp, err := client.GetUpdates(ctx, state.GetUpdatesBuf, ilink.ChannelVersion, timeout)
 		if err != nil {
@@ -62,8 +62,8 @@ func (s *Server) shortPoll(ctx context.Context, botID string, timeout time.Durat
 }
 
 // resolveTarget picks the send target: single peer by default, else current.
-func (s *Server) resolveTarget(ctx context.Context, botID string) (to, token string, err error) {
-	u, err := s.store.GetUser(ctx, botID)
+func (s *Server) resolveTarget(ctx context.Context, userID string) (to, token string, err error) {
+	u, err := s.store.GetUser(ctx, userID)
 	if err != nil {
 		return "", "", err
 	}
@@ -73,16 +73,16 @@ func (s *Server) resolveTarget(ctx context.Context, botID string) (to, token str
 // sendText sends one text message.
 // pollTimeout > 0: short-poll first to refresh buf/tokens and return backlog.
 // pollTimeout == 0: pure cache send, no GetUpdates call, msgs always empty.
-func (s *Server) sendText(ctx context.Context, botID, text string, pollTimeout time.Duration) (to string, msgs []MsgItem, sent bool, sendErr string) {
+func (s *Server) sendText(ctx context.Context, userID, text string, pollTimeout time.Duration) (to string, msgs []MsgItem, sent bool, sendErr string) {
 	if pollTimeout > 0 {
 		var err error
-		msgs, err = s.shortPoll(ctx, botID, pollTimeout)
+		msgs, err = s.shortPoll(ctx, userID, pollTimeout)
 		if err != nil {
 			return "", msgsOrEmpty(msgs), false, err.Error()
 		}
 	}
 
-	u, err := s.store.GetUser(ctx, botID)
+	u, err := s.store.GetUser(ctx, userID)
 	if err != nil {
 		return "", msgsOrEmpty(msgs), false, err.Error()
 	}
