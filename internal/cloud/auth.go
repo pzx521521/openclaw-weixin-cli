@@ -14,6 +14,8 @@ const (
 	sessionTTL    = 30 * 24 * time.Hour
 	minPassLen    = 6
 	verifyTimeout = 12 * time.Second
+	// DefaultSendTimeout bounds the send history fetch; 0 disables polling.
+	DefaultSendTimeout = 500 * time.Millisecond
 )
 
 // HashPassword bcrypt-hashes a user password.

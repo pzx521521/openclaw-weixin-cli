@@ -25,7 +25,8 @@ func main() {
 func run() error {
 	portFlag := flag.Int("port", 0, "listen port (overrides PORT env)")
 	webDir := flag.String("web", "web/dist", "frontend static dir")
-	pollTimeout := flag.Duration("poll", 2*time.Second, "short poll timeout for send/ready")
+	pollTimeout := flag.Duration("poll", 60*time.Second, "long poll timeout for account ready wait")
+	sendTimeout := flag.Duration("send-timeout", cloud.DefaultSendTimeout, "history fetch timeout for send, 0 disables polling")
 	dsnFlag := flag.String("dsn", "", "postgres DSN (overrides PGSTORE_WECHAT_DSN)")
 	flag.Parse()
 
@@ -50,7 +51,7 @@ func run() error {
 		return err
 	}
 
-	srv := cloud.NewServer(store, *pollTimeout, *webDir)
+	srv := cloud.NewServer(store, *pollTimeout, *sendTimeout, *webDir)
 	mux := http.NewServeMux()
 	srv.Mount(mux)
 

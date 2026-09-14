@@ -6,7 +6,7 @@
 
 ```bash
 export PGSTORE_WECHAT_DSN="postgres://user:pass@host:5432/db?sslmode=disable"
-go run ./cmd/cloud [-port 7860] [-web web/dist] [-poll 2s] [-dsn ...]
+go run ./cmd/cloud [-port 7860] [-web web/dist] [-poll 60s] [-send-timeout 200ms] [-dsn ...]
 ```
 
 | 配置                 | 默认       | 说明                        |
@@ -14,7 +14,8 @@ go run ./cmd/cloud [-port 7860] [-web web/dist] [-poll 2s] [-dsn ...]
 | `-port` ＞ `PORT`    | `7860`     | 监听端口，传参优先          |
 | `-dsn`/`PGSTORE_WECHAT_DSN` | —   | PG 连接串，缺失直接退出     |
 | `-web`               | `web/dist` | 前端静态目录                |
-| `-poll`              | `2s`       | send/ready 的短轮询时长     |
+| `-poll`              | `60s`      | ready 等待第一条消息的长轮询时长（前端倒计时即取此值） |
+| `-send-timeout`      | `200ms`    | send 取历史的超时：`0`=纯缓存直发不拉取，`>0`=短 poll 后发并返回积压消息 |
 
 表结构启动时自动迁移（`wechat_users`、`wechat_sessions`），`bot_token` 明文存库。
 
@@ -35,9 +36,9 @@ go run ./cmd/cloud [-port 7860] [-web web/dist] [-poll 2s] [-dsn ...]
 | `POST` | `/api/register/finish`  | 无                | `{password, bot_token, bot_id, user_id, base_url}` |
 | `POST` | `/api/login`            | 无                | `{bot_id, password}` → 种 cookie        |
 | `POST` | `/api/logout`           | cookie            | 清会话                                  |
-| `GET`  | `/api/me`               | cookie            | `{bot_id, ready, peer}`                 |
-| `GET`  | `/api/account/ready`    | cookie            | 短 poll 一次，`{ready, peer?}`          |
-| `POST` | `/api/send`             | cookie **或** body | `{text}` 或 `{bot_id, password, text}` → `{to, msgs, sent, error?}` |
+| `GET`  | `/api/me`               | cookie            | `{bot_id, ready, peer, poll_timeout}`，激活页倒计时取此值 |
+| `GET`  | `/api/account/ready`    | cookie            | 长等一次（`-poll`，等满时长），`{ready, peer?}`；没收到第一条消息进不了发件页 |
+| `POST` | `/api/send`             | cookie **或** body | `{text}` 或 `{bot_id, password, text}` → `{to, msgs, sent, error?}`；`msgs` 仅短 poll 模式非空；失败（token 过期等）去激活页发条微信刷新；支持跨域（`OPTIONS` 预检 + `*`），免登录直调 |
 
 `send` 直调示例（脚本免登录）：
 

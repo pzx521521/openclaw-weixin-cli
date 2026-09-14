@@ -70,12 +70,16 @@ func (s *Server) resolveTarget(ctx context.Context, botID string) (to, token str
 	return s.resolveTargetFromUser(u)
 }
 
-// sendText polls once for fresh tokens, then sends one text message.
-// It returns the accumulated messages and the send outcome.
+// sendText sends one text message.
+// pollTimeout > 0: short-poll first to refresh buf/tokens and return backlog.
+// pollTimeout == 0: pure cache send, no GetUpdates call, msgs always empty.
 func (s *Server) sendText(ctx context.Context, botID, text string, pollTimeout time.Duration) (to string, msgs []MsgItem, sent bool, sendErr string) {
-	msgs, err := s.shortPoll(ctx, botID, pollTimeout)
-	if err != nil {
-		return "", msgsOrEmpty(msgs), false, err.Error()
+	if pollTimeout > 0 {
+		var err error
+		msgs, err = s.shortPoll(ctx, botID, pollTimeout)
+		if err != nil {
+			return "", msgsOrEmpty(msgs), false, err.Error()
+		}
 	}
 
 	u, err := s.store.GetUser(ctx, botID)

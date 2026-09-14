@@ -88,7 +88,9 @@ func runLogin(args []string) error {
 	defer cancel()
 
 	client := ilink.NewClient(ilink.NormalizeBaseURL(*baseURL), "")
-	qrResp, err := client.FetchLoginQRCode(ctx, ilink.DefaultBotType)
+	qrCtx, qrCancel := context.WithTimeout(ctx, 30*time.Second)
+	qrResp, err := client.FetchLoginQRCode(qrCtx, ilink.DefaultBotType)
+	qrCancel()
 	if err != nil {
 		return err
 	}

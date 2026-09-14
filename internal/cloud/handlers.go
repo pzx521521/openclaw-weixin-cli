@@ -17,16 +17,22 @@ import (
 // Server wires HTTP handlers to the store.
 type Server struct {
 	store *Store
-	poll  time.Duration
-	web   string
+	// poll bounds the ready long wait; sendPoll bounds the send history fetch.
+	// sendPoll == 0 means pure cache send (no GetUpdates call).
+	poll     time.Duration
+	sendPoll time.Duration
+	web      string
 }
 
 // NewServer builds the HTTP server dependencies.
-func NewServer(store *Store, pollTimeout time.Duration, webDir string) *Server {
+func NewServer(store *Store, pollTimeout, sendTimeout time.Duration, webDir string) *Server {
 	if pollTimeout <= 0 {
-		pollTimeout = 2 * time.Second
+		pollTimeout = 60 * time.Second
 	}
-	return &Server{store: store, poll: pollTimeout, web: webDir}
+	if sendTimeout < 0 {
+		sendTimeout = DefaultSendTimeout
+	}
+	return &Server{store: store, poll: pollTimeout, sendPoll: sendTimeout, web: webDir}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -268,13 +274,15 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		peer = to
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"bot_id": botID,
-		"ready":  u.Ready,
-		"peer":   peer,
+		"bot_id":       botID,
+		"ready":        u.Ready,
+		"peer":         peer,
+		"poll_timeout": int(s.poll.Seconds()),
 	})
 }
 
-// handleReady polls once and reports whether the first inbound arrived.
+// handleReady waits up to the poll timeout for the first inbound message.
+// A single getupdates may return early-empty, so loop until the deadline.
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	botID, ok := s.authBotID(r)
 	if !ok {
@@ -284,16 +292,29 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.poll+10*time.Second)
 	defer cancel()
 
-	if _, err := s.shortPoll(ctx, botID, s.poll); err != nil {
-		writeErr(w, http.StatusBadGateway, err.Error())
-		return
+	deadline := time.Now().Add(s.poll)
+	for {
+		if time.Until(deadline) <= 0 {
+			writeJSON(w, http.StatusOK, map[string]any{"ready": false})
+			return
+		}
+		if _, err := s.shortPoll(ctx, botID, time.Until(deadline)); err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		if to, _, err := s.resolveTarget(ctx, botID); err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ready": true, "peer": to})
+			return
+		}
 	}
-	to, _, err := s.resolveTarget(ctx, botID)
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"ready": false})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ready": true, "peer": to})
+}
+
+// setCORSHeaders allows cross-origin direct calls (bot_id + password, no cookies).
+func setCORSHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	w.Header().Set("Access-Control-Max-Age", "86400")
 }
 
 type sendReq struct {
@@ -304,6 +325,11 @@ type sendReq struct {
 
 // handleSend supports cookie sessions and direct bot_id + password auth.
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	var req sendReq
 	if !decodeBody(w, r, &req) {
 		return
@@ -330,10 +356,10 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		botID = u.BotID
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), s.poll+20*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), s.sendPoll+20*time.Second)
 	defer cancel()
 
-	to, msgs, sent, sendErr := s.sendText(ctx, botID, text, s.poll)
+	to, msgs, sent, sendErr := s.sendText(ctx, botID, text, s.sendPoll)
 	out := map[string]any{"to": to, "msgs": msgs, "sent": sent}
 	if !sent {
 		out["error"] = sendErr

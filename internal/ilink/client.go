@@ -69,6 +69,13 @@ type SendMessageRequest struct {
 	Msg WeixinMessage `json:"msg"`
 }
 
+// SendMessageResponse is the sendmessage response body.
+type SendMessageResponse struct {
+	Ret     int    `json:"ret"`
+	ErrCode int    `json:"errcode,omitempty"`
+	ErrMsg  string `json:"errmsg,omitempty"`
+}
+
 // WeixinMessage is the main upstream/downstream message type.
 type WeixinMessage struct {
 	Seq          int           `json:"seq,omitempty"`
@@ -104,13 +111,15 @@ type VoiceItem struct {
 }
 
 // NewClient builds an API client with sane defaults.
+//
+// Per-request timeouts are enforced via context (postJSON always applies one,
+// and FetchLoginQRCode/PollLoginStatus callers pass bounded contexts), so the
+// shared HTTP client sets no overall Timeout that could abort long polls early.
 func NewClient(baseURL, token string) *Client {
 	return &Client{
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		Token:   strings.TrimSpace(token),
-		HTTPClient: &http.Client{
-			Timeout: DefaultLongPollTimeout + 5*time.Second,
-		},
+		BaseURL:    strings.TrimRight(baseURL, "/"),
+		Token:      strings.TrimSpace(token),
+		HTTPClient: &http.Client{},
 	}
 }
 
@@ -218,7 +227,14 @@ func (c *Client) SendText(ctx context.Context, toUserID, text, contextToken stri
 		},
 	}
 
-	return c.postJSON(ctx, "/ilink/bot/sendmessage", req, nil, 15*time.Second)
+	var out SendMessageResponse
+	if err := c.postJSON(ctx, "/ilink/bot/sendmessage", req, &out, 15*time.Second); err != nil {
+		return err
+	}
+	if out.Ret != 0 || out.ErrCode != 0 {
+		return fmt.Errorf("sendmessage ret=%d errcode=%d errmsg=%s", out.Ret, out.ErrCode, out.ErrMsg)
+	}
+	return nil
 }
 
 // postJSON issues a JSON POST with the required Weixin headers.
