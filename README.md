@@ -51,3 +51,9 @@ demo 聊天模式支持以下命令：
 - 只有收到过该用户消息并拿到 `context_token` 后，才能对这个用户回复
 - 仅有登录账号自己的 `user_id` 不足以主动给任意用户发消息
 - 一个 `session.json` 只对应一个扫码绑定的号，多号用 `-state` 分文件跑
+
+
+
+
+社区 [52pojie](https://www.52pojie.cn/)
+社区 [Linux do](https://linux.do/)
