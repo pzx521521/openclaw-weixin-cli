@@ -55,5 +55,6 @@ demo 聊天模式支持以下命令：
 
 
 
-社区 [52pojie](https://www.52pojie.cn/)
-社区 [Linux do](https://linux.do/)
+社区   
+[52pojie](https://www.52pojie.cn/)  
+[Linux do](https://linux.do/)
