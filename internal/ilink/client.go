@@ -1,4 +1,4 @@
-package main
+package ilink
 
 import (
 	"bytes"
@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	defaultBaseURL         = "https://ilinkai.weixin.qq.com"
-	defaultBotType         = "3"
-	defaultLongPollTimeout = 35 * time.Second
+	DefaultBaseURL         = "https://ilinkai.weixin.qq.com"
+	DefaultBotType         = "3"
+	DefaultLongPollTimeout = 35 * time.Second
+	ChannelVersion         = "1.0.2"
 )
 
 // Client talks to the Weixin iLink HTTP API.
@@ -108,7 +109,7 @@ func NewClient(baseURL, token string) *Client {
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Token:   strings.TrimSpace(token),
 		HTTPClient: &http.Client{
-			Timeout: defaultLongPollTimeout + 5*time.Second,
+			Timeout: DefaultLongPollTimeout + 5*time.Second,
 		},
 	}
 }
@@ -175,7 +176,7 @@ func (c *Client) PollLoginStatus(ctx context.Context, qrcode string) (*QRStatusR
 // GetUpdates performs one HTTP long-poll request for inbound messages.
 func (c *Client) GetUpdates(ctx context.Context, buf string, channelVersion string, timeout time.Duration) (*GetUpdatesResponse, error) {
 	if timeout <= 0 {
-		timeout = defaultLongPollTimeout
+		timeout = DefaultLongPollTimeout
 	}
 
 	body := GetUpdatesRequest{
@@ -188,7 +189,7 @@ func (c *Client) GetUpdates(ctx context.Context, buf string, channelVersion stri
 	var out GetUpdatesResponse
 	err := c.postJSON(ctx, "/ilink/bot/getupdates", body, &out, timeout)
 	if err != nil {
-		if isTimeoutError(err) {
+		if IsTimeoutError(err) {
 			return &GetUpdatesResponse{Ret: 0, Msgs: nil, GetUpdatesBuf: buf}, nil
 		}
 		return nil, err
@@ -300,8 +301,8 @@ func generateClientID() string {
 	return fmt.Sprintf("wechat-%d", time.Now().UnixNano())
 }
 
-// isTimeoutError treats HTTP context deadlines as normal long-poll timeouts.
-func isTimeoutError(err error) bool {
+// IsTimeoutError treats HTTP context deadlines as normal long-poll timeouts.
+func IsTimeoutError(err error) bool {
 	if err == nil {
 		return false
 	}

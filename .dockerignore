@@ -1,0 +1,6 @@
+openclaw-weixin/
+session*.json
+login-qr.png
+.git/
+.idea/
+.DS_Store

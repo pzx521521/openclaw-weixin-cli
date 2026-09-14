@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>微信发件系统</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f2f4f7; margin: 0; padding: 24px 12px; color: #222; }
+  .card { max-width: 520px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 28px 24px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+  h2 { margin: 0 0 18px; font-size: 20px; text-align: center; }
+  label { display: block; font-size: 14px; margin: 12px 0 6px; color: #555; }
+  input, textarea { width: 100%; padding: 10px 12px; font-size: 15px; border: 1px solid #d5dae1; border-radius: 8px; outline: none; }
+  input:focus, textarea:focus { border-color: #07c160; }
+  textarea { min-height: 96px; resize: vertical; }
+  button { width: 100%; margin-top: 16px; padding: 12px; font-size: 16px; color: #fff; background: #07c160; border: 0; border-radius: 8px; cursor: pointer; }
+  button:disabled { background: #9fd8b8; cursor: default; }
+  button.ghost { background: #fff; color: #07c160; border: 1px solid #07c160; }
+  .link { display: block; text-align: center; margin-top: 14px; font-size: 14px; color: #576b95; cursor: pointer; }
+  .err { margin-top: 12px; font-size: 14px; color: #fa5151; white-space: pre-wrap; }
+  .ok { margin-top: 12px; font-size: 14px; color: #07c160; word-break: break-all; }
+  .hint { margin-top: 12px; font-size: 13px; color: #888; line-height: 1.6; }
+  .qr { display: block; width: 240px; height: 240px; margin: 12px auto; border: 1px solid #eee; border-radius: 8px; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 13px; word-break: break-all; background: #f6f7f9; padding: 8px; border-radius: 6px; }
+  pre.out { margin-top: 12px; font-size: 12px; background: #1e1e1e; color: #d6deeb; padding: 12px; border-radius: 8px; overflow: auto; max-height: 320px; white-space: pre-wrap; word-break: break-all; }
+  .row { display: flex; gap: 10px; }
+  .row button { flex: 1; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <!-- 登录 -->
+  <div id="view-login">
+    <h2>登录</h2>
+    <label>bot_id（用户名）</label>
+    <input id="login-bot" placeholder="xxxx@im.bot" autocomplete="username">
+    <label>密码</label>
+    <input id="login-pass" type="password" placeholder="注册时设置的密码" autocomplete="current-password">
+    <button id="btn-login" onclick="doLogin()">登录</button>
+    <div class="err" id="login-err"></div>
+    <span class="link" onclick="show('view-register')">没有账号？去注册 →</span>
+  </div>
+
+  <!-- 注册 -->
+  <div id="view-register" class="hidden">
+    <h2>注册</h2>
+    <div id="reg-step1">
+      <label>设置密码（≥6 位）</label>
+      <input id="reg-pass" type="password" placeholder="登录与 API 共用此密码" autocomplete="new-password">
+      <label>确认密码</label>
+      <input id="reg-pass2" type="password" autocomplete="new-password">
+      <button id="btn-reg-qr" onclick="regStart()">下一步：获取二维码</button>
+      <div class="err" id="reg-err1"></div>
+    </div>
+    <div id="reg-step2" class="hidden">
+      <p class="hint" style="text-align:center">用微信扫码，确认登录</p>
+      <img class="qr" id="reg-qr" alt="登录二维码">
+      <p class="hint" id="reg-status" style="text-align:center">等待扫码…</p>
+      <div class="err" id="reg-err2"></div>
+    </div>
+    <div id="reg-step3" class="hidden">
+      <p class="ok">扫码成功！你的 bot_id：</p>
+      <p class="mono" id="reg-botid"></p>
+      <p class="hint">最后一步：用你的微信发 <b>任意一条消息</b>（给自己或任意好友都行），拿到回信凭证后即可发件。</p>
+      <p class="hint" id="reg-ready-tip" style="text-align:center">等待你的第一条微信消息…</p>
+      <div class="err" id="reg-err3"></div>
+    </div>
+    <span class="link" onclick="regCancel();show('view-login')">← 返回登录</span>
+  </div>
+
+  <!-- 发件 -->
+  <div id="view-app" class="hidden">
+    <h2>发件</h2>
+    <p class="hint" id="app-who"></p>
+    <label>消息内容</label>
+    <textarea id="send-text" placeholder="输入要发送的文本"></textarea>
+    <div class="row">
+      <button id="btn-send" onclick="doSend()">发送</button>
+      <button class="ghost" onclick="doLogout()">退出</button>
+    </div>
+    <div class="err" id="send-err"></div>
+    <pre class="out hidden" id="send-out"></pre>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let regTimer = null;
+
+function show(id) {
+  ['view-login', 'view-register', 'view-app'].forEach(v => $(v).classList.add('hidden'));
+  $(id).classList.remove('hidden');
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  let data = {};
+  try { data = await r.json(); } catch (e) { /* 非 JSON */ }
+  if (!r.ok) throw new Error(data.error || ('请求失败 ' + r.status));
+  return data;
+}
+const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+// ---------- 登录 ----------
+async function doLogin() {
+  $('login-err').textContent = '';
+  $('btn-login').disabled = true;
+  try {
+    const d = await post('/api/login', { bot_id: $('login-bot').value.trim(), password: $('login-pass').value });
+    localStorage.setItem('bot_id', d.bot_id);
+    $('login-pass').value = '';
+    await enterApp();
+  } catch (e) { $('login-err').textContent = e.message; }
+  $('btn-login').disabled = false;
+}
+
+// ---------- 注册 ----------
+function regCancel() {
+  if (regTimer) { clearInterval(regTimer); regTimer = null; }
+  $('reg-step1').classList.remove('hidden');
+  $('reg-step2').classList.add('hidden');
+  $('reg-step3').classList.add('hidden');
+}
+
+async function regStart() {
+  $('reg-err1').textContent = '';
+  const p1 = $('reg-pass').value, p2 = $('reg-pass2').value;
+  if (p1.length < 6) { $('reg-err1').textContent = '密码至少 6 位'; return; }
+  if (p1 !== p2) { $('reg-err1').textContent = '两次密码不一致'; return; }
+  $('btn-reg-qr').disabled = true;
+  try {
+    const d = await post('/api/register/qr', { password: p1 });
+    $('reg-qr').src = 'data:image/png;base64,' + d.qr_png;
+    $('reg-step1').classList.add('hidden');
+    $('reg-step2').classList.remove('hidden');
+    pollRegStatus(d.qrcode, p1);
+  } catch (e) { $('reg-err1').textContent = e.message; }
+  $('btn-reg-qr').disabled = false;
+}
+
+async function pollRegStatus(qrcode, password) {
+  const sleep = ms => new Promise(r => regTimer = setTimeout(r, ms));
+  while (true) {
+    let d;
+    try {
+      d = await api('/api/register/status?qrcode=' + encodeURIComponent(qrcode));
+    } catch (e) { $('reg-err2').textContent = e.message; await sleep(2000); continue; }
+    if (d.status === 'scaned') $('reg-status').textContent = '已扫码，请在手机上确认登录…';
+    else if (d.status === 'expired') { $('reg-err2').textContent = '二维码已过期，请返回重来'; return; }
+    else if (d.status === 'confirmed') { regFinish(password, d); return; }
+    else $('reg-status').textContent = '等待扫码…';
+    await sleep(2000);
+  }
+}
+
+async function regFinish(password, d) {
+  try {
+    const r = await post('/api/register/finish', {
+      password, bot_token: d.bot_token, bot_id: d.bot_id, user_id: d.user_id || '', base_url: d.base_url || ''
+    });
+    localStorage.setItem('bot_id', r.bot_id);
+    $('reg-pass').value = ''; $('reg-pass2').value = '';
+    $('reg-botid').textContent = r.bot_id;
+    $('reg-step2').classList.add('hidden');
+    $('reg-step3').classList.remove('hidden');
+    pollReady();
+  } catch (e) { $('reg-err2').textContent = e.message; }
+}
+
+async function pollReady() {
+  const sleep = ms => new Promise(r => regTimer = setTimeout(r, ms));
+  while (true) {
+    try {
+      const d = await api('/api/account/ready');
+      if (d.ready) { await enterApp(); return; }
+    } catch (e) { $('reg-err3').textContent = e.message; }
+    await sleep(2500);
+  }
+}
+
+// ---------- 发件 ----------
+async function enterApp() {
+  regCancel();
+  try {
+    const me = await api('/api/me');
+    $('app-who').textContent = '当前账号：' + me.bot_id + (me.peer ? '　对方：' + me.peer : '');
+    show('view-app');
+  } catch (e) { show('view-login'); }
+}
+
+async function doSend() {
+  $('send-err').textContent = '';
+  $('send-out').classList.add('hidden');
+  $('btn-send').disabled = true;
+  try {
+    const d = await post('/api/send', { text: $('send-text').value });
+    $('send-out').textContent = JSON.stringify(d, null, 2);
+    $('send-out').classList.remove('hidden');
+    if (!d.sent && d.error) $('send-err').textContent = d.error;
+  } catch (e) { $('send-err').textContent = e.message; }
+  $('btn-send').disabled = false;
+}
+
+async function doLogout() {
+  try { await post('/api/logout', {}); } catch (e) {}
+  $('send-text').value = '';
+  show('view-login');
+}
+
+// ---------- 入口 ----------
+(function init() {
+  const saved = localStorage.getItem('bot_id');
+  if (saved) $('login-bot').value = saved;
+  fetch('/api/me').then(r => { if (r.ok) enterApp(); });
+})();
+</script>
+</body>
+</html>

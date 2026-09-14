@@ -11,154 +11,25 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
+
+	ilink "github.com/pzx521521/openclaw-weixin-cli/internal/ilink"
 )
 
 const (
 	defaultStatePath = "session.json"
 	defaultQRPath    = "login-qr.png"
-	channelVersion   = "1.0.2"
 )
 
 var (
 	logger      = newLogger(os.Stdout)
 	errorLogger = newLogger(os.Stderr)
 )
-
-// ChatRegistry tracks the latest reply context for each peer.
-type ChatRegistry struct {
-	mu      sync.RWMutex
-	current string
-	peers   map[string]SessionPeer
-}
-
-// NewChatRegistry builds the in-memory chat state from persisted session data.
-func NewChatRegistry(state *SessionState) *ChatRegistry {
-	peers := make(map[string]SessionPeer)
-	current := ""
-	if state != nil {
-		for peer, saved := range state.Peers {
-			peer = strings.TrimSpace(peer)
-			saved.ContextToken = strings.TrimSpace(saved.ContextToken)
-			saved.LastSeenAt = strings.TrimSpace(saved.LastSeenAt)
-			if peer == "" || saved.ContextToken == "" {
-				continue
-			}
-			peers[peer] = saved
-		}
-		current = strings.TrimSpace(state.CurrentPeer)
-		if current != "" {
-			if _, ok := peers[current]; !ok {
-				current = ""
-			}
-		}
-	}
-	return &ChatRegistry{
-		current: current,
-		peers:   peers,
-	}
-}
-
-// Upsert records the latest context token for one peer.
-func (r *ChatRegistry) Upsert(peer, contextToken string, seenAt time.Time) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if peer == "" {
-		return
-	}
-
-	entry := r.peers[peer]
-	if contextToken != "" {
-		entry.ContextToken = contextToken
-	}
-	if !seenAt.IsZero() {
-		entry.LastSeenAt = seenAt.Format(time.RFC3339)
-	}
-	r.peers[peer] = entry
-	if r.current == "" {
-		r.current = peer
-	}
-}
-
-// SetCurrent switches the active peer used by plain text input.
-func (r *ChatRegistry) SetCurrent(peer string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, ok := r.peers[peer]; !ok {
-		return fmt.Errorf("unknown peer: %s", peer)
-	}
-	r.current = peer
-	return nil
-}
-
-// Current returns the selected peer and its context token.
-func (r *ChatRegistry) Current() (string, string, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	if r.current == "" {
-		return "", "", false
-	}
-	peer, ok := r.peers[r.current]
-	return r.current, peer.ContextToken, ok
-}
-
-// List returns the known peers in stable order.
-func (r *ChatRegistry) List() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	peers := make([]string, 0, len(r.peers))
-	for peer := range r.peers {
-		peers = append(peers, peer)
-	}
-	sort.Slice(peers, func(i, j int) bool {
-		left := r.peers[peers[i]].LastSeenAt
-		right := r.peers[peers[j]].LastSeenAt
-		if left == right {
-			return peers[i] < peers[j]
-		}
-		return left > right
-	})
-	return peers
-}
-
-// Token returns the latest context token for one peer.
-func (r *ChatRegistry) Token(peer string) (string, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	entry, ok := r.peers[peer]
-	return entry.ContextToken, ok
-}
-
-// LastSeenAt returns the last inbound time recorded for one peer.
-func (r *ChatRegistry) LastSeenAt(peer string) string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	return r.peers[peer].LastSeenAt
-}
-
-// ApplyToState copies the current registry snapshot into the persisted session.
-func (r *ChatRegistry) ApplyToState(state *SessionState) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	state.CurrentPeer = r.current
-	state.Peers = make(map[string]SessionPeer, len(r.peers))
-	for peer, saved := range r.peers {
-		state.Peers[peer] = saved
-	}
-}
 
 // main runs the CLI entrypoint.
 func main() {
@@ -188,13 +59,13 @@ func run(args []string) error {
 func runAuto(args []string) error {
 	fs := flag.NewFlagSet("auto", flag.ContinueOnError)
 	statePath := fs.String("state", defaultStatePath, "path to session state JSON")
-	baseURL := fs.String("base-url", defaultBaseURL, "iLink API base URL")
+	baseURL := fs.String("base-url", ilink.DefaultBaseURL, "iLink API base URL")
 	qrPath := fs.String("qr", defaultQRPath, "where to save the QR PNG")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	if HasUsableSession(*statePath) {
+	if ilink.HasUsableSession(*statePath) {
 		logger.Info("检测到可用 session，进入聊天模式", "state", *statePath)
 		return runChat([]string{"-state", *statePath})
 	}
@@ -207,7 +78,7 @@ func runAuto(args []string) error {
 func runLogin(args []string) error {
 	fs := flag.NewFlagSet("login", flag.ContinueOnError)
 	statePath := fs.String("state", defaultStatePath, "path to session state JSON")
-	baseURL := fs.String("base-url", defaultBaseURL, "iLink API base URL")
+	baseURL := fs.String("base-url", ilink.DefaultBaseURL, "iLink API base URL")
 	qrPath := fs.String("qr", defaultQRPath, "where to save the QR PNG")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -216,8 +87,8 @@ func runLogin(args []string) error {
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	client := NewClient(normalizeBaseURL(*baseURL), "")
-	qrResp, err := client.FetchLoginQRCode(ctx, defaultBotType)
+	client := ilink.NewClient(ilink.NormalizeBaseURL(*baseURL), "")
+	qrResp, err := client.FetchLoginQRCode(ctx, ilink.DefaultBotType)
 	if err != nil {
 		return err
 	}
@@ -234,13 +105,13 @@ func runLogin(args []string) error {
 		return err
 	}
 
-	state := &SessionState{
+	state := &ilink.SessionState{
 		BotToken: status.BotToken,
 		BotID:    status.ILinkBotID,
 		UserID:   status.ILinkUserID,
-		BaseURL:  normalizeBaseURL(status.BaseURL),
+		BaseURL:  ilink.NormalizeBaseURL(status.BaseURL),
 	}
-	if err := SaveState(*statePath, state); err != nil {
+	if err := ilink.SaveState(*statePath, state); err != nil {
 		return err
 	}
 
@@ -251,15 +122,15 @@ func runLogin(args []string) error {
 }
 
 // waitForLogin blocks until the QR login is confirmed or expires.
-func waitForLogin(ctx context.Context, client *Client, qrcode string) (*QRStatusResponse, error) {
+func waitForLogin(ctx context.Context, client *ilink.Client, qrcode string) (*ilink.QRStatusResponse, error) {
 	deadline := time.Now().Add(8 * time.Minute)
 
 	for time.Now().Before(deadline) {
-		pollCtx, cancel := context.WithTimeout(ctx, defaultLongPollTimeout)
+		pollCtx, cancel := context.WithTimeout(ctx, ilink.DefaultLongPollTimeout)
 		status, err := client.PollLoginStatus(pollCtx, qrcode)
 		cancel()
 		if err != nil {
-			if isTimeoutError(err) {
+			if ilink.IsTimeoutError(err) {
 				continue
 			}
 			return nil, err
@@ -274,7 +145,7 @@ func waitForLogin(ctx context.Context, client *Client, qrcode string) (*QRStatus
 				return nil, errors.New("login confirmed but token or bot id missing")
 			}
 			if strings.TrimSpace(status.BaseURL) == "" {
-				status.BaseURL = defaultBaseURL
+				status.BaseURL = ilink.DefaultBaseURL
 			}
 			return status, nil
 		case "expired":
@@ -301,7 +172,7 @@ func runChat(args []string) error {
 		return err
 	}
 
-	state, err := LoadState(*statePath)
+	state, err := ilink.LoadState(*statePath)
 	if err != nil {
 		return fmt.Errorf("load state: %w", err)
 	}
@@ -312,8 +183,8 @@ func runChat(args []string) error {
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	client := NewClient(state.BaseURL, state.BotToken)
-	registry := NewChatRegistry(state)
+	client := ilink.NewClient(state.BaseURL, state.BotToken)
+	registry := ilink.NewChatRegistry(state)
 	var persistMu sync.Mutex
 
 	logger.Info("聊天模式已启动", "bot_id", state.BotID)
@@ -353,8 +224,8 @@ func runChat(args []string) error {
 }
 
 // pollLoop keeps fetching inbound messages and updating the saved cursor.
-func pollLoop(ctx context.Context, client *Client, state *SessionState, statePath string, registry *ChatRegistry, ioMu *sync.Mutex, persistMu *sync.Mutex) error {
-	timeout := defaultLongPollTimeout
+func pollLoop(ctx context.Context, client *ilink.Client, state *ilink.SessionState, statePath string, registry *ilink.ChatRegistry, ioMu *sync.Mutex, persistMu *sync.Mutex) error {
+	timeout := ilink.DefaultLongPollTimeout
 
 	for {
 		select {
@@ -363,7 +234,7 @@ func pollLoop(ctx context.Context, client *Client, state *SessionState, statePat
 		default:
 		}
 
-		resp, err := client.GetUpdates(ctx, state.GetUpdatesBuf, channelVersion, timeout)
+		resp, err := client.GetUpdates(ctx, state.GetUpdatesBuf, ilink.ChannelVersion, timeout)
 		if err != nil {
 			return err
 		}
@@ -378,7 +249,7 @@ func pollLoop(ctx context.Context, client *Client, state *SessionState, statePat
 
 		if resp.GetUpdatesBuf != "" && resp.GetUpdatesBuf != state.GetUpdatesBuf {
 			state.GetUpdatesBuf = resp.GetUpdatesBuf
-			if err := persistState(statePath, state, registry, persistMu); err != nil {
+			if err := ilink.PersistState(statePath, state, registry, persistMu); err != nil {
 				return err
 			}
 		}
@@ -392,7 +263,7 @@ func pollLoop(ctx context.Context, client *Client, state *SessionState, statePat
 }
 
 // handleInbound logs one inbound message and caches its reply token.
-func handleInbound(msg WeixinMessage, state *SessionState, statePath string, registry *ChatRegistry, ioMu *sync.Mutex, persistMu *sync.Mutex) error {
+func handleInbound(msg ilink.WeixinMessage, state *ilink.SessionState, statePath string, registry *ilink.ChatRegistry, ioMu *sync.Mutex, persistMu *sync.Mutex) error {
 	from := strings.TrimSpace(msg.FromUserID)
 	if from == "" {
 		return nil
@@ -407,13 +278,13 @@ func handleInbound(msg WeixinMessage, state *SessionState, statePath string, reg
 	registry.Upsert(from, strings.TrimSpace(msg.ContextToken), seenAt)
 	afterToken, _ := registry.Token(from)
 	afterCurrent, _, _ := registry.Current()
-	text := extractMessageText(msg)
+	text := ilink.ExtractMessageText(msg)
 	if text == "" {
-		text = summarizeMessage(msg)
+		text = ilink.SummarizeMessage(msg)
 	}
 
 	if !beforeOK || beforeToken != afterToken || beforeCurrent != afterCurrent {
-		if err := persistState(statePath, state, registry, persistMu); err != nil {
+		if err := ilink.PersistState(statePath, state, registry, persistMu); err != nil {
 			return err
 		}
 	}
@@ -426,7 +297,7 @@ func handleInbound(msg WeixinMessage, state *SessionState, statePath string, reg
 }
 
 // inputLoop reads terminal commands and sends outbound replies.
-func inputLoop(ctx context.Context, client *Client, state *SessionState, statePath string, registry *ChatRegistry, ioMu *sync.Mutex, persistMu *sync.Mutex) error {
+func inputLoop(ctx context.Context, client *ilink.Client, state *ilink.SessionState, statePath string, registry *ilink.ChatRegistry, ioMu *sync.Mutex, persistMu *sync.Mutex) error {
 	lineCh := make(chan string)
 	scanErrCh := make(chan error, 1)
 
@@ -492,7 +363,7 @@ func inputLoop(ctx context.Context, client *Client, state *SessionState, statePa
 }
 
 // handleCommand executes one terminal command.
-func handleCommand(ctx context.Context, line string, client *Client, state *SessionState, statePath string, registry *ChatRegistry, ioMu *sync.Mutex, persistMu *sync.Mutex) error {
+func handleCommand(ctx context.Context, line string, client *ilink.Client, state *ilink.SessionState, statePath string, registry *ilink.ChatRegistry, ioMu *sync.Mutex, persistMu *sync.Mutex) error {
 	fields := strings.Fields(line)
 	switch fields[0] {
 	case "/help":
@@ -526,7 +397,7 @@ func handleCommand(ctx context.Context, line string, client *Client, state *Sess
 		if err := registry.SetCurrent(fields[1]); err != nil {
 			return err
 		}
-		if err := persistState(statePath, state, registry, persistMu); err != nil {
+		if err := ilink.PersistState(statePath, state, registry, persistMu); err != nil {
 			return err
 		}
 		ioMu.Lock()
@@ -548,7 +419,7 @@ func handleCommand(ctx context.Context, line string, client *Client, state *Sess
 }
 
 // sendToCurrent sends one line to the currently selected peer.
-func sendToCurrent(ctx context.Context, client *Client, registry *ChatRegistry, text string) error {
+func sendToCurrent(ctx context.Context, client *ilink.Client, registry *ilink.ChatRegistry, text string) error {
 	peer, token, ok := registry.Current()
 	if !ok || peer == "" {
 		return errors.New("no current peer, wait for a message or use /users then /use")
@@ -560,7 +431,7 @@ func sendToCurrent(ctx context.Context, client *Client, registry *ChatRegistry, 
 }
 
 // sendToPeer sends one line to an explicit peer.
-func sendToPeer(ctx context.Context, client *Client, state *SessionState, statePath string, registry *ChatRegistry, peer, text string, persistMu *sync.Mutex) error {
+func sendToPeer(ctx context.Context, client *ilink.Client, state *ilink.SessionState, statePath string, registry *ilink.ChatRegistry, peer, text string, persistMu *sync.Mutex) error {
 	token, ok := registry.Token(peer)
 	if !ok || token == "" {
 		return fmt.Errorf("peer %s has no cached context token yet", peer)
@@ -568,57 +439,18 @@ func sendToPeer(ctx context.Context, client *Client, state *SessionState, stateP
 	if err := registry.SetCurrent(peer); err != nil {
 		return err
 	}
-	if err := persistState(statePath, state, registry, persistMu); err != nil {
+	if err := ilink.PersistState(statePath, state, registry, persistMu); err != nil {
 		return err
 	}
 	return client.SendText(ctx, peer, text, token)
 }
 
-// extractMessageText picks the first text segment from an inbound message.
-func extractMessageText(msg WeixinMessage) string {
-	for _, item := range msg.ItemList {
-		if item.Type == 1 && item.TextItem != nil {
-			return strings.TrimSpace(item.TextItem.Text)
-		}
-		if item.Type == 3 && item.VoiceItem != nil {
-			return strings.TrimSpace(item.VoiceItem.Text)
-		}
-	}
-	return ""
-}
-
-// summarizeMessage provides a readable fallback for non-text messages.
-func summarizeMessage(msg WeixinMessage) string {
-	if len(msg.ItemList) == 0 {
-		return "[empty message]"
-	}
-
-	kinds := make([]string, 0, len(msg.ItemList))
-	for _, item := range msg.ItemList {
-		switch item.Type {
-		case 1:
-			kinds = append(kinds, "text")
-		case 2:
-			kinds = append(kinds, "image")
-		case 3:
-			kinds = append(kinds, "voice")
-		case 4:
-			kinds = append(kinds, "file")
-		case 5:
-			kinds = append(kinds, "video")
-		default:
-			kinds = append(kinds, fmt.Sprintf("type-%d", item.Type))
-		}
-	}
-	return "[" + strings.Join(kinds, ", ") + "]"
-}
-
 // logUsage prints the top-level CLI usage.
 func logUsage() {
 	logger.Info("用法")
-	logger.Info("命令", "value", "go run . login [-state session.json] [-base-url https://ilinkai.weixin.qq.com] [-qr login-qr.png]")
-	logger.Info("命令", "value", "go run . chat  [-state session.json]")
-	logger.Info("命令", "value", "go run . [-state session.json] [-base-url ...] [-qr login-qr.png]")
+	logger.Info("命令", "value", "go run ./cmd/demo login [-state session.json] [-base-url https://ilinkai.weixin.qq.com] [-qr login-qr.png]")
+	logger.Info("命令", "value", "go run ./cmd/demo chat  [-state session.json]")
+	logger.Info("命令", "value", "go run ./cmd/demo [-state session.json] [-base-url ...] [-qr login-qr.png]")
 }
 
 // logChatHelp prints the interactive chat commands.
@@ -662,19 +494,10 @@ func newLogger(w io.Writer) *slog.Logger {
 }
 
 // printPromptLocked redraws the input prompt after async log output.
-func printPromptLocked(registry *ChatRegistry) {
+func printPromptLocked(registry *ilink.ChatRegistry) {
 	if current, _, ok := registry.Current(); ok {
 		_, _ = os.Stdout.WriteString("> [" + current + "] ")
 		return
 	}
 	_, _ = os.Stdout.WriteString("> ")
-}
-
-// persistState saves session and cached users without letting concurrent writes race.
-func persistState(statePath string, state *SessionState, registry *ChatRegistry, persistMu *sync.Mutex) error {
-	persistMu.Lock()
-	defer persistMu.Unlock()
-
-	registry.ApplyToState(state)
-	return SaveState(statePath, state)
 }

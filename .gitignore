@@ -2,3 +2,6 @@
 /.idea
 session.json
 wechat-cli
+/openclaw-weixin
+session.1.json
+login-qr.png

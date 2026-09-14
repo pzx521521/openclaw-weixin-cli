@@ -1,4 +1,4 @@
-package main
+package ilink
 
 import (
 	"encoding/json"
@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// SessionState persists the login token and long-poll cursor.
+// SessionPeer persists the reply context for one peer.
 type SessionPeer struct {
 	ContextToken string `json:"context_token"`
 	LastSeenAt   string `json:"last_seen_at,omitempty"`
@@ -65,7 +65,7 @@ func LoadState(path string) (*SessionState, error) {
 			state.Peers[peer] = SessionPeer{ContextToken: token}
 		}
 	}
-	state.BaseURL = normalizeBaseURL(state.BaseURL)
+	state.BaseURL = NormalizeBaseURL(state.BaseURL)
 	if state.Peers == nil {
 		state.Peers = make(map[string]SessionPeer)
 	}
@@ -90,7 +90,7 @@ func SaveState(path string, state *SessionState) error {
 		return err
 	}
 
-	state.BaseURL = normalizeBaseURL(state.BaseURL)
+	state.BaseURL = NormalizeBaseURL(state.BaseURL)
 	if state.Peers == nil {
 		state.Peers = make(map[string]SessionPeer)
 	}
@@ -108,11 +108,11 @@ func SaveState(path string, state *SessionState) error {
 	return os.Rename(tmp, path)
 }
 
-// normalizeBaseURL keeps the saved base URL usable across restarts.
-func normalizeBaseURL(baseURL string) string {
+// NormalizeBaseURL keeps the saved base URL usable across restarts.
+func NormalizeBaseURL(baseURL string) string {
 	baseURL = strings.TrimSpace(baseURL)
 	if baseURL == "" {
-		return defaultBaseURL
+		return DefaultBaseURL
 	}
 	return strings.TrimRight(baseURL, "/")
 }
