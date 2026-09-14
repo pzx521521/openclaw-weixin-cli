@@ -257,7 +257,7 @@ async function enterApp(prefetched) {
     if (me.poll_timeout > 0) pollSecs = me.poll_timeout;
     if (!me.ready) { showActivate(me.user_id); return; }
     currentUser = me.user_id || '';
-    $('app-who').textContent = '当前账号：' + (me.user_id || '') + (me.peer ? '　WeChatClaw ID：' + me.peer : '');
+    $('app-who').textContent = '当前账号：' + (me.user_id || '') + ((me.peer && me.peer !== me.user_id) ? '　WeChatClaw ID：' + me.peer : '');
     refreshCurl();
     show('view-app');
   } catch (e) { show('view-login'); }
